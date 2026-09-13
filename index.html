@@ -5,17 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-
-    <!-- アイコンをつけるときは、<head> タグの中（<meta>タグの下など）に追加してください -->
-<link rel="icon" href="icon.png" type="image/png">
-<link rel="apple-touch-icon" href="icon.png">
-
-
 <title>手書きメモ</title>
 <style>
 * {
   box-sizing: border-box;
   -webkit-tap-highlight-color: transparent;
+
+  /* iPhone Safariで文字選択・長押しメニューを出さない */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 html, body {
   margin: 0;
@@ -39,6 +38,11 @@ html, body {
   display: block;
   background: #fff;
   touch-action: none;
+
+  /* Canvasをテキストや画像として選択させない */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 #toolbar {
   position: absolute;
@@ -284,6 +288,32 @@ button:active {
       y: e.clientY - rect.top
     };
   }
+
+  // iPhone Safariの文字選択、長押しメニュー、ドラッグ選択を抑止する
+  document.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+  }, { passive: false });
+
+  document.addEventListener("selectstart", (e) => {
+    e.preventDefault();
+  }, { passive: false });
+
+  document.addEventListener("dragstart", (e) => {
+    e.preventDefault();
+  }, { passive: false });
+
+  document.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+  }, { passive: false });
+
+  // Canvas上ではSafari側の既定タッチ操作を完全に止める
+  canvas.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+  }, { passive: false });
+
+  canvas.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+  }, { passive: false });
 
   canvas.addEventListener("pointerdown", (e) => {
     if (e.clientY >= toolbar.getBoundingClientRect().top) return;
