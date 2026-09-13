@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+
+    <!-- アイコンをつけるときは、<head> タグの中（<meta>タグの下など）に追加してください -->
+<link rel="icon" href="icon.png" type="image/png">
+<link rel="apple-touch-icon" href="icon.png">
+
+
+<title>手書きメモ</title>
+<style>
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+html, body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #fff;
+  touch-action: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+}
+#app {
+  position: fixed;
+  inset: 0;
+  background: #fff;
+}
+#canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #fff;
+  touch-action: none;
+}
+#toolbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  gap: 12px;
+  padding: 10px max(12px, env(safe-area-inset-right))
+           max(10px, env(safe-area-inset-bottom))
+           max(12px, env(safe-area-inset-left));
+  background: rgba(255,255,255,0.94);
+  border-top: 1px solid rgba(0,0,0,0.12);
+  touch-action: manipulation;
+}
+button {
+  flex: 1;
+  height: 52px;
+  border: 0;
+  border-radius: 12px;
+  font-size: 18px;
+  font-weight: 600;
+  background: #ededed;
+  color: #111;
+}
+button:active {
+  transform: scale(0.98);
+  opacity: 0.75;
+}
+#save {
+  background: #111;
+  color: #fff;
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="canvas"></canvas>
+  <div id="toolbar">
+    <button id="clear" type="button">削除</button>
+    <button id="save" type="button">保存</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  const toolbar = document.getElementById("toolbar");
+  const clearButton = document.getElementById("clear");
+  const saveButton = document.getElementById("save");
+
+  const DB_NAME = "handwritingMemoDB";
+  const STORE_NAME = "memo";
+  const MEMO_KEY = "current";
+  let db = null;
+
+  let drawing = false;
+  let lastX = 0;
+  let lastY = 0;
+  let saveTimer = null;
+
+  function openDatabase() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, 1);
+
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        if (!database.objectStoreNames.contains(STORE_NAME)) {
+          database.createObjectStore(STORE_NAME);
+        }
+      };
+
+      request.onsuccess = () => {
+        db = request.result;
+        resolve(db);
+      };
+
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  function getStoredMemo() {
+    return new Promise((resolve, reject) => {
+      if (!db) {
+        resolve(null);
+        return;
+      }
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const request = tx.objectStore(STORE_NAME).get(MEMO_KEY);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  function storeMemo(blob) {
+    return new Promise((resolve, reject) => {
+      if (!db) {
+        resolve();
+        return;
+      }
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).put(blob, MEMO_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  function deleteStoredMemo() {
+    return new Promise((resolve, reject) => {
+      if (!db) {
+        resolve();
+        return;
+      }
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).delete(MEMO_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  function setPen() {
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 3;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+  }
+
+  function fillWhite() {
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+    ctx.restore();
+  }
+
+  function resizeCanvas(preserve = true) {
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    let old = null;
+
+    if (preserve && canvas.width && canvas.height) {
+      old = document.createElement("canvas");
+      old.width = canvas.width;
+      old.height = canvas.height;
+      old.getContext("2d").drawImage(canvas, 0, 0);
+    }
+
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, w, h);
+
+    if (old) {
+      ctx.drawImage(
+        old,
+        0, 0, old.width, old.height,
+        0, 0, w, h
+      );
+    }
+
+    setPen();
+  }
+
+  function restoreBlob(blob) {
+    return new Promise((resolve) => {
+      if (!blob) {
+        resolve();
+        return;
+      }
+
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+
+      img.onload = () => {
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+
+        ctx.save();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, w, h);
+
+        const sourceCssWidth = img.width / dpr;
+        const sourceCssHeight = img.height / dpr;
+
+        ctx.drawImage(
+          img,
+          0, 0, img.width, img.height,
+          0, 0,
+          Math.min(w, sourceCssWidth),
+          Math.min(h, sourceCssHeight)
+        );
+        ctx.restore();
+
+        setPen();
+        URL.revokeObjectURL(url);
+        resolve();
+      };
+
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve();
+      };
+
+      img.src = url;
+    });
+  }
+
+  function saveCurrentMemoNow() {
+    clearTimeout(saveTimer);
+    return new Promise((resolve) => {
+      canvas.toBlob(async (blob) => {
+        if (blob) {
+          try {
+            await storeMemo(blob);
+          } catch (e) {
+            console.error("自動保存に失敗しました。", e);
+          }
+        }
+        resolve();
+      }, "image/png");
+    });
+  }
+
+  function scheduleAutoSave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveCurrentMemoNow, 250);
+  }
+
+  function pointFromEvent(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top
+    };
+  }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    if (e.clientY >= toolbar.getBoundingClientRect().top) return;
+
+    drawing = true;
+    canvas.setPointerCapture(e.pointerId);
+
+    const p = pointFromEvent(e);
+    lastX = p.x;
+    lastY = p.y;
+
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#000";
+    ctx.fill();
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!drawing) return;
+
+    const p = pointFromEvent(e);
+    ctx.beginPath();
+    ctx.moveTo(lastX, lastY);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+
+    lastX = p.x;
+    lastY = p.y;
+  });
+
+  function stopDrawing(e) {
+    if (!drawing) return;
+    drawing = false;
+
+    if (e && canvas.hasPointerCapture(e.pointerId)) {
+      canvas.releasePointerCapture(e.pointerId);
+    }
+
+    scheduleAutoSave();
+  }
+
+  canvas.addEventListener("pointerup", stopDrawing);
+  canvas.addEventListener("pointercancel", stopDrawing);
+
+  clearButton.addEventListener("click", async () => {
+    // 誤操作防止のため、削除前に確認する
+    const confirmed = window.confirm("削除しますか？");
+    if (!confirmed) return;
+
+    clearTimeout(saveTimer);
+    fillWhite();
+    setPen();
+
+    try {
+      await deleteStoredMemo();
+    } catch (e) {
+      console.error("保存データの削除に失敗しました。", e);
+    }
+  });
+
+  saveButton.addEventListener("click", async () => {
+    await saveCurrentMemoNow();
+
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const toolbarTop = toolbar.getBoundingClientRect().top;
+    const output = document.createElement("canvas");
+
+    output.width = canvas.width;
+    output.height = Math.round(toolbarTop * dpr);
+
+    const outCtx = output.getContext("2d", { alpha: false });
+    outCtx.fillStyle = "#fff";
+    outCtx.fillRect(0, 0, output.width, output.height);
+    outCtx.drawImage(
+      canvas,
+      0, 0, canvas.width, output.height,
+      0, 0, output.width, output.height
+    );
+
+    output.toBlob(async (blob) => {
+      if (!blob) {
+        alert("画像を作成できませんでした。");
+        return;
+      }
+
+      const now = new Date();
+      const pad = n => String(n).padStart(2, "0");
+      const name =
+        "手書きメモ-" +
+        now.getFullYear() +
+        pad(now.getMonth() + 1) +
+        pad(now.getDate()) + "-" +
+        pad(now.getHours()) +
+        pad(now.getMinutes()) +
+        ".png";
+
+      const file = new File([blob], name, { type: "image/png" });
+
+      if (
+        navigator.share &&
+        navigator.canShare &&
+        navigator.canShare({ files: [file] })
+      ) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: "手書きメモ"
+          });
+          return;
+        } catch (error) {
+          if (error && error.name === "AbortError") return;
+        }
+      }
+
+      const url = URL.createObjectURL(blob);
+      const opened = window.open(url, "_blank");
+
+      if (!opened) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        a.click();
+      }
+
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }, "image/png");
+  });
+
+  async function initialize() {
+    resizeCanvas(false);
+
+    try {
+      await openDatabase();
+      const saved = await getStoredMemo();
+      await restoreBlob(saved);
+    } catch (e) {
+      console.error("保存データを読み込めませんでした。", e);
+    }
+  }
+
+  window.addEventListener("resize", () => {
+    resizeCanvas(true);
+    scheduleAutoSave();
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      saveCurrentMemoNow();
+    }
+  });
+
+  window.addEventListener("pagehide", () => {
+    saveCurrentMemoNow();
+  });
+
+  initialize();
+})();
+</script>
+</body>
+</html>
