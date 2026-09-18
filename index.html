@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<title>手書きメモ</title>
+<title>260919-0638 取り消し・2点同時タッチ誤描画防止</title>
 <style>
 * {
   box-sizing: border-box;
@@ -82,6 +82,7 @@ button:active {
 <div id="app">
   <canvas id="canvas"></canvas>
   <div id="toolbar">
+    <button id="undo" type="button" aria-label="取り消し">↺</button>
     <button id="clear" type="button">削除</button>
     <button id="save" type="button">保存</button>
   </div>
@@ -92,6 +93,7 @@ button:active {
   const canvas = document.getElementById("canvas");
   const ctx = canvas.getContext("2d", { alpha: false });
   const toolbar = document.getElementById("toolbar");
+  const undoButton = document.getElementById("undo");
   const clearButton = document.getElementById("clear");
   const saveButton = document.getElementById("save");
 
@@ -104,6 +106,15 @@ button:active {
   let lastX = 0;
   let lastY = 0;
   let saveTimer = null;
+
+  // 1本指だけを描画に使うための状態管理
+  let activePointerId = null;
+  const pressedPointers = new Set();
+  let multiTouchBlocked = false;
+
+  // 直前の操作を戻すための履歴
+  const undoStack = [];
+  const MAX_UNDO = 30;
 
   function openDatabase() {
     return new Promise((resolve, reject) => {
@@ -178,6 +189,38 @@ button:active {
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
     ctx.restore();
+  }
+
+  function pushUndoState() {
+    const snapshot = document.createElement("canvas");
+    snapshot.width = canvas.width;
+    snapshot.height = canvas.height;
+    snapshot.getContext("2d").drawImage(canvas, 0, 0);
+    undoStack.push(snapshot);
+
+    if (undoStack.length > MAX_UNDO) {
+      undoStack.shift();
+    }
+
+    updateUndoButton();
+  }
+
+  function updateUndoButton() {
+    undoButton.disabled = undoStack.length === 0;
+    undoButton.style.opacity = undoStack.length === 0 ? "0.4" : "1";
+  }
+
+  function restoreUndoState() {
+    if (undoStack.length === 0) return;
+
+    const snapshot = undoStack.pop();
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(snapshot, 0, 0);
+    ctx.restore();
+    setPen();
+    updateUndoButton();
+    scheduleAutoSave();
   }
 
   function resizeCanvas(preserve = true) {
@@ -318,8 +361,24 @@ button:active {
   canvas.addEventListener("pointerdown", (e) => {
     if (e.clientY >= toolbar.getBoundingClientRect().top) return;
 
+    pressedPointers.add(e.pointerId);
+
+    // 2本以上が同時に触れた場合は、その間は描画しない
+    if (pressedPointers.size >= 2) {
+      multiTouchBlocked = true;
+      drawing = false;
+      activePointerId = null;
+      return;
+    }
+
+    if (multiTouchBlocked) return;
+
+    activePointerId = e.pointerId;
     drawing = true;
     canvas.setPointerCapture(e.pointerId);
+
+    // 1ストローク開始前の状態を履歴に保存する
+    pushUndoState();
 
     const p = pointFromEvent(e);
     lastX = p.x;
@@ -333,6 +392,8 @@ button:active {
 
   canvas.addEventListener("pointermove", (e) => {
     if (!drawing) return;
+    if (multiTouchBlocked) return;
+    if (e.pointerId !== activePointerId) return;
 
     const p = pointFromEvent(e);
     ctx.beginPath();
@@ -345,18 +406,33 @@ button:active {
   });
 
   function stopDrawing(e) {
-    if (!drawing) return;
-    drawing = false;
+    pressedPointers.delete(e.pointerId);
 
-    if (e && canvas.hasPointerCapture(e.pointerId)) {
-      canvas.releasePointerCapture(e.pointerId);
+    if (e.pointerId === activePointerId) {
+      if (drawing) {
+        drawing = false;
+        scheduleAutoSave();
+      }
+
+      if (canvas.hasPointerCapture(e.pointerId)) {
+        canvas.releasePointerCapture(e.pointerId);
+      }
+
+      activePointerId = null;
     }
 
-    scheduleAutoSave();
+    // 2本指操作の後は、全ての指が離れるまで新しい描画を開始しない
+    if (pressedPointers.size === 0) {
+      multiTouchBlocked = false;
+    }
   }
 
   canvas.addEventListener("pointerup", stopDrawing);
   canvas.addEventListener("pointercancel", stopDrawing);
+
+  undoButton.addEventListener("click", () => {
+    restoreUndoState();
+  });
 
   clearButton.addEventListener("click", async () => {
     // 誤操作防止のため、削除前に確認する
@@ -364,6 +440,7 @@ button:active {
     if (!confirmed) return;
 
     clearTimeout(saveTimer);
+    pushUndoState();
     fillWhite();
     setPen();
 
@@ -449,8 +526,11 @@ button:active {
       await openDatabase();
       const saved = await getStoredMemo();
       await restoreBlob(saved);
+      undoStack.length = 0;
+      updateUndoButton();
     } catch (e) {
       console.error("保存データを読み込めませんでした。", e);
+      updateUndoButton();
     }
   }
 
